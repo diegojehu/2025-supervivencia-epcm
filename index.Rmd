@@ -1,0 +1,34 @@
+---
+title: "Prefacio y Tabla de Contenido"
+course: "Análisis de Supervivencia en EPCM usando R"
+author: "Diego Aguilar-Ramirez & El Equipo MCPS"
+date: "`r format(Sys.Date())`"
+output:
+  rmdformats::readthedown:
+    code_folding: show
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    css: custom.css
+---
+
+Este manual presenta una introducción al análisis de supervivencia usando R, específicamente aplicado a datos con el formato que usa el Estudio Prospectivo de la Ciudad de México (EPCM).
+
+# Objetivos del curso
+
+- Aprender los fundamentos del análisis de supervivencia
+- Aplicar métodos de Cox y análisis de edad-en-riesgo
+- Crear visualizaciones efectivas de datos de supervivencia
+
+# Contenido del manual
+
+El manual está organizado en cinco secciones:  
+1. [Material preparatorio](01_precourse-material-spa.html)  
+2. [Análisis de Supervivencia](02_survival-analysis-spa.html)   
+3. [Modelos de Cox de Riesgos Proporcionales](03_cox-ph-models-spa.html)  
+4. [Análisis de edad-en-riesgo](04_age-at-risk-spa.html)   
+5. [Visualización de datos epidemiológicos](05_epi-data-vis-spa.html)   
+
+---
+
+\newpage

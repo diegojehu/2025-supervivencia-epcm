@@ -1,0 +1,7 @@
+# RStudio project/user state
+.Rhistory
+.RData
+.Rproj.user/
+
+# Data files will not be version-controlled
+*.csv

@@ -1,0 +1,500 @@
+---
+title: "Análisis de Supervivencia"
+course: "Análisis de Supervivencia en EPCM usando R"
+author: "Diego Aguilar-Ramirez & El Equipo EPCM"
+date: "`r format(Sys.Date())`"
+output:
+  rmdformats::readthedown:
+    code_folding: show
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    css: custom.css
+---
+
+```{r setup-ch1, echo=FALSE, include=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(devtools)
+#if (!require("emo")) devtools::install_github("hadley/emo")
+pacman::p_load(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+En esta libreta de ejercicios prácticos, revisaremos los conceptos cubiertos en la sesión "Conceptos teóricos del análisis de supervivencia", incluyendo:
+
+1.  **Datos de tiempo hasta el evento**\
+2.  **Análisis de supervivencia.**
+
+## El conjunto de datos similar a EPCM o 'MCPS-like'  
+
+Se ha creado un conjunto de datos similar a EPCM ('MCP-like') para esta práctica. Este conjunto de datos simulados se asemeja mucho al formato de los datos disponibles para investigadores que solicitan acceso a los datos de EPCM. El objetivo es que los usuarios se sientan seguros usando los datos reales de EPCM para sus proyectos después de trabajar con el conjunto de datos 'MCPS-like' en este taller.  
+
+Para ser claros, el conjunto de datos 'MCPS-like' es **similar**, pero **NO es idéntico**, al conjunto de datos reales de EPCM y fue creado **únicamente** con fines educativos.  
+
+Para facilitar los análisis en esta práctica, las variables dentro del conjunto de datos 'MCPS-like' han sido sometidos a control de calidad (QC). Específicamente, removimos:  
+
+- Duplicados  
+- Participantes que, al momento del reclutamiento, tenían más de 84 años o tenían alguna enfermedad previa (excepto diabetes) 
+- Aquellos que tenían seguimiento de mortalidad incierto  
+- Observaciones implausibles o faltantes 
+
+Otros pasos de QC incluyeron recodificar ciertas variables (ej. nivel educativo, tabaquismo, consumo de alcohol, y actividad física) basándose en investigaciones previamente publicadas de EPCM.  
+
+El **conjunto de datos** junto con un **diccionario de datos** están disponibles en el material del curso dentro de la subcarpeta `~/data/`.
+
+## Reconocimientos
+
+Esta práctica fue desarrollada con el apoyo continuo de [Rachel Wade](https://www.ndph.ox.ac.uk/team/rachel-wade), quien creó el archivo 'MCPS-like' y proporcionó retroalimentación invaluable. La función para la expansión de Lexis usada en la sección 6 fue desarrollada por [Neil Wright](https://www.ndph.ox.ac.uk/team/neil-wright), investigador del China Kadoorie Biobank.  
+
+------------------------------------------------------------------------
+
+# Configuración
+
+Como se discutió en el material previo al curso, siempre es buena idea mantener un registro de tus pasos usando un script. Así que hagamos un nuevo script para esta práctica.
+
+## Crear script de R
+
+Abre el proyecto de R creado en el material previo al curso (es decir, `workshop.Rproj`).
+
+Ve a **File** \> **New File** \> **R Script**
+
+En el script **Untitled1** que acabas de crear, escribe:
+
+```{r}
+# Práctica 1
+# Autor: tu nombre va aquí
+# Última edición: 09/Oct/2025
+```
+
+Ahora, guardemos el script:
+
+-   Ve a **File** \> **Save As...** (nota que RStudio automáticamente abre en la ubicación del proyecto de R). Guarda el archivo de script en el directorio raíz del proyecto.\
+-   Guarda este script como `01.practica-1.R`.
+
+## Cargar datos
+
+Usualmente, muy temprano en cualquier análisis de datos tendrás que cargar un conjunto o base de datos en R. Hagamos esto ahora.
+
+Me gusta usar el paquete `data.table` para cargar bases de datos en R, pero nota que hay muchas otras opciones disponibles (ver ejemplo usando `read.csv()`).
+
+```{r, echo = TRUE}
+# Cargar el paquete data.table, instalado en el material previo al curso
+pacman::p_load(data.table)
+
+# Cargar los datos simulados 'MCPS-like.csv'
+dummy_df <- data.table::fread(file = 'data/MCPS-like.csv') 
+
+# También puedes usar read.csv() si lo prefieres
+# dummy_df <- read.csv(file = 'data/MCPS-like.csv')
+```
+
+Ahora tienes un objeto de R de clase `data.table` y `data.frame` con el nombre `dummy_df`. Tómate un momento para explorarlo.
+
+Una opción es usar la función `str()`.
+
+```{r, echo = TRUE}
+# Explorar los datos
+
+# Usar 'str()'
+str(dummy_df)
+```
+
+Puedes ver que el data frame tiene `r ncol(dummy_df)` columnas y `r nrow(dummy_df)` observaciones. Para cada columna, puedes ver el nombre, el tipo (ej. `chr` o `int` o `num`), y los valores para las primeras cinco filas.
+
+Antes de continuar, ahora es buen momento para *limpiar* los nombres de las columnas.
+
+Como has notado, todos los nombres de las columnas están en MAYÚSCULAS lo cual es, si no problemático, un poco confuso. Sin embargo, datos con peor formato pueden tener nombres de columnas con espacios en blanco entre palabras, o una mezcla de MAYÚSCULAS y minúsculas, lo cual puede ser problemático (es decir, propenso a errores).
+
+La función `clean_names()` del paquete de R `janitor` estandariza los nombres de columnas convirtiéndolos a un formato consistente `snake_case`, haciéndolos más fáciles de trabajar en R.
+
+```{r, echo=TRUE}
+pacman::p_load(janitor)
+
+dummy_df <- janitor::clean_names(dummy_df)
+```
+
+Puedes ver qué hizo esta función a `dummy_df` usando `str()`.
+
+------------------------------------------------------------------------
+
+# 1. Preparando datos para análisis de supervivencia
+
+## Repaso
+
+**Recuerda**:\
+- En datos de supervivencia el resultado principal bajo evaluación es el **tiempo hasta un evento de interés**.\
+- Como el evento **no** se observa en todos los participantes, lo que sucede es la **censura**.
+
+**La censura** puede surgir cuando un participante:\
+- No ha experimentado (aún) el evento.\
+- Se pierde durante el seguimiento.\
+- Experimenta un evento diferente que hace imposible el seguimiento.
+
+Antes de hacer cualquier análisis, necesitamos asegurarnos de que las columnas en los datos que usaremos estén formateadas correctamente (es decir, R entiende cuál es el tipo de datos para cada variable).
+
+## Explorando los datos {.tabset .tabset-fade .tabset-pills}
+
+Como medida de seguridad adicional para proteger la privacidad de los participantes, EPCM no proporciona las fechas cuando los participantes murieron. En su lugar, se proporciona el tiempo de seguimiento (en personas-año) (`person_years`).
+
+Específicamente, este tiempo de seguimiento denota, para cada participante, el tiempo entre la fecha de reclutamiento y ya sea la fecha de muerte o la fecha cuando se terminó el último enlace (para estos datos, la fecha es el 30 de septiembre de 2022).
+
+En términos prácticos, lo que esto significa es que el tiempo de seguimiento no necesita ser calculado ya que ya está proporcionado. La base de datos ya está lista para usarse.
+
+Echemos un vistazo más de cerca a los datos 'imprimiendo' el resumen o algunos valores de variables relacionadas con fechas, seguimiento y eventos.
+
+### Actividad
+
+Usa las siguientes funciones `summary()`, `dim()`, `nrow()`, `ncol()`, `names()`, `table()`, `unique()` para explorar las variables `year_recruited`, `month_recruited`, `person_years`, `status`, y `d000`.
+
+### Fechas de reclutamiento
+
+```{r, echo=TRUE}
+# Fechas de reclutamiento
+summary(dummy_df$year_recruited)
+summary(dummy_df$month_recruited)
+```
+
+------------------------------------------------------------------------
+
+### Personas-año
+
+```{r}
+# Personas-año
+summary(dummy_df$person_years)
+```
+
+------------------------------------------------------------------------
+
+### Estado
+
+```{r}
+# Estado
+str(dummy_df$status)
+unique(dummy_df$status)
+table(dummy_df$status)
+```
+
+------------------------------------------------------------------------
+
+### d000
+
+```{r}
+# D000
+summary(dummy_df$d000)
+unique(dummy_df$d000)
+table(dummy_df$d000)
+```
+
+------------------------------------------------------------------------
+
+### d015
+
+```{r}
+# D015
+summary(dummy_df$d015)
+unique(dummy_df$d015)
+table(dummy_df$d015)
+```
+
+------------------------------------------------------------------------
+
+### Interpretación
+
+Algunas cosas a notar:
+
+-   `year_recruited` y `month_recruited` son números enteros y no están formateados como fechas. Lo que realmente queremos son las fechas cuando los participantes fueron reclutados.
+
+-   `person_years` es una variable numérica que va desde `r min(dummy_df$person_years)` hasta `r max(dummy_df$person_years)`.
+
+-   `status` y `d000` son variables muy similares. `status` denota el estado vital de cada participante `D="Muerto"` y `A="Vivo"`. `d000` denota si el evento de interés, en este caso **mortalidad por todas las causas**, fue observado en este participante. Si fue así, entonces `d000=1`, si no fue así, entonces el participante fue **censurado** y `d000=0` porque el evento de interés en este ejemplo es **mortalidad por todas las causas** `status=d000`.
+
+-   `d015` denota muertes debido a cualquier causa vascular. En participantes cuya muerte fue codificada como debido a una causa vascular `d015=1`. Si ya sea murieron debido a otra causa o si no habían sido enlazados a ningún certificado de defunción, entonces fueron censurados `d015=0`.
+
+------------------------------------------------------------------------
+
+# 2. Creando objetos de supervivencia
+
+**Recuerda**: El método **Kaplan-Meier** se usa para estimar la probabilidad de supervivencia (y tiempos de supervivencia).
+
+La función `Surv()` del paquete de R `survival` crea un objeto de supervivencia que representa el tiempo de supervivencia y el estado del evento, el cual se usa como la variable de respuesta en modelos de análisis de supervivencia.
+
+Habrá una entrada para cada sujeto que es el tiempo de supervivencia, el cual es seguido por un `+` si el sujeto fue censurado.
+
+Veamos las primeras 10 observaciones:
+
+```{r}
+# Cargar el paquete de R
+pacman::p_load(survival)
+
+Surv(time = dummy_df$person_years, # tiempo de seguimiento
+     event = dummy_df$d000)[1:10]  # evento es mortalidad por todas las causas
+```
+
+El participante 1 fue censurado después de **19.2** años, mientras que el participante 6 tuvo un evento (murió) después de 0.78 años.
+
+La función `survfit()` crea curvas de supervivencia usando el método **Kaplan-Meier**.
+
+Generemos las estimaciones de supervivencia generales para la cohorte similar a EPCM.
+
+```{r, echo=TRUE}
+# nombre del objeto al cual se asignará la salida de la función survfit()
+s1 <- 
+  survfit(
+    # esta es una fórmula de R, denotando que supervivencia igual a 1 
+    # es decir, todos los participantes
+    Surv(person_years,d000) ~ 1, 
+    data = dummy_df
+  )
+
+str(s1)
+```
+
+Para crear curvas de supervivencia, este objeto `survfit` llamado `s1` tiene varios componentes importantes:
+
+1.  `time`: los puntos de tiempo en los cuales al menos un evento ocurrió.\
+2.  `n.risk`: el número de participantes que están en riesgo del evento en el `time` correspondiente.\
+3.  `n.event`: el número de eventos que ocurrieron en el `time` correspondiente.\
+4.  `surv`: la estimación de supervivencia en el `time` correspondiente.
+
+Echemos un vistazo a 10 observaciones de estos componentes:
+
+```{r}
+# Haciendo una tabla simplificada para facilitar el ejemplo
+# con nuevos nombres para las columnas
+survival_tbl <- data.frame(
+  "surv_times" = s1$time,
+  "num_at_risk" = s1$n.risk,
+  "num_events" = s1$n.event,
+  "surv_est" = s1$surv
+)
+# Mostrar filas 1001 a 1010
+survival_tbl[1001:1010,]
+```
+
+Usando la fórmula
+
+$$S(t_j)=S(t_{j-1})(1-d_j/n_j)$$
+
+la probabilidad de que un participante de EPCM sobreviva hasta el tiempo $t_j$ (ej. **8.520 años**) es la probabilidad de sobrevivir hasta el tiempo $t_{j-1}$ (ej. **8.498 años**; prob = `r survival_tbl$surv_est[1003]`) multiplicada por la probabilidad de entonces sobrevivir el intervalo entre los tiempos $t_{j-1}$ y $t_j$ (prob = `r 1-(survival_tbl$num_events[1004]/survival_tbl$num_at_risk[1004])`). Donde $j=1004$ (es decir, es la fila 1004).
+
+Calculemos esto manualmente:
+
+```{r}
+surv_answer <- 
+  # Probabilidad de sobrevivir hasta el punto de tiempo precedente
+  survival_tbl$surv_est[1003] * 
+  # Probabilidad de sobrevivir el intervalo
+  1-(survival_tbl$num_events[1004]/survival_tbl$num_at_risk[1004])
+surv_answer
+```
+
+Y comparémoslo con la estimación de supervivencia para la fila 1004:
+
+```{r}
+survival_tbl[1003:1004,]
+```
+
+**Nota**: revisa la Clase 1 para más información sobre estos cálculos.
+
+------------------------------------------------------------------------
+
+Generalmente, estamos más interesados en describir la supervivencia general de la población.
+
+Esto se puede lograr visualizando la relación entre el tiempo de supervivencia y la estimación de supervivencia.
+
+```{r}
+plot(
+  y=s1$surv,
+  x=s1$time,
+  ylim=c(0,1)
+  )
+```
+
+El eje *Y* muestra la estimación de **supervivencia** en cada punto en el **tiempo** (en años).
+
+**Recuerda** que la estimación de supervivencia es la **probabilidad de supervivencia acumulativa**. En este caso, observamos que la probabilidad de supervivencia acumulativa de esta muestra de participantes de EPCM durante casi 25 años de seguimiento es de **0.78**.
+
+Si estás interesado en calcular la probabilidad de supervivencia hasta y más allá de un tiempo dado, esto se puede lograr usando:
+
+```{r}
+# probabilidad de supervivencia
+summary(
+  # Ajustar modelo de supervivencia
+  survfit(Surv(person_years, d000) ~ 1,data = dummy_df),
+  # Definir tiempo en años
+  times = 20)
+```
+
+La probabilidad estimada de supervivencia a 20 años para los participantes de la cohorte similar a EPCM es **0.82**.
+
+------------------------------------------------------------------------
+
+# 3. Curvas de supervivencia
+
+Las curvas de supervivencia de buena calidad usualmente incluyen más información que la mostrada arriba. El [paquete `ggsurvfit`](https://www.danieldsjoberg.com/ggsurvfit/index.html) facilita la producción de curvas KM.
+
+No entraremos en detalles de cómo usar este paquete, pero proporcionamos un ejemplo abajo:
+
+```{r, echo=TRUE}
+# Cargar el paquete de R
+pacman::p_load(ggsurvfit)
+
+# Usar la función survfit2 para hacer un nuevo objeto de supervivencia y canalizarlo
+survfit2(Surv(person_years, d000) ~ 1, data = dummy_df) %>% 
+  # Usar la función ggsurvfit para hacer el gráfico usando ggplot2
+  ggsurvfit() +
+  # Agregar título y etiquetas 
+  labs(
+    title = "Supervivencia general en 20,000 participantes de EPCM\ncon edades de 35-84 años al reclutamiento.",
+    x = "Años desde el reclutamiento",
+    y = "Probabilidad de supervivencia general"
+    ) + 
+  # Agregar intervalos de confianza a las curvas
+  add_confidence_interval() +
+  # Agregar números en riesgo y eventos a lo largo del tiempo
+  add_risktable() +  
+  # Establecer el rango del eje y de 0 a 1
+  coord_cartesian(ylim = c(0, 1))
+```
+
+También puedes hacer esto por sexo y agregar una prueba de log-rank.
+
+```{r, echo=TRUE}
+# Hacer una nueva variable de sexo como factor
+dummy_df$sex <- factor(ifelse(dummy_df$male == 1, "Hombres", "Mujeres"))
+
+# Usar la función survfit2 para hacer un nuevo objeto de supervivencia
+# Nota que el modelo ha cambiado, e incluye sexo
+survfit2(Surv(person_years, d000) ~ sex, data = dummy_df) %>% 
+  # Usar la función ggsurvfit para hacer el gráfico usando ggplot2
+  ggsurvfit() +
+  # Agregar título y etiquetas 
+  labs(
+    title = "Supervivencia general en 20,000 participantes de EPCM\ncon edades de 35-84 años al reclutamiento, por sexo.",
+    x = "Años desde el reclutamiento",
+    y = "Probabilidad de supervivencia general"
+    ) + 
+  # Agregar intervalos de confianza a las curvas
+  add_confidence_interval() +
+  # Agregar números en riesgo y eventos a lo largo del tiempo
+  add_risktable() + 
+  # Agregar un subtítulo con el resultado de una prueba de log-rank
+  add_pvalue(caption = "Log-rank {p.value}") +
+  # Establecer el rango del eje y de 0 a 1
+  coord_cartesian(ylim = c(0, 1))
+```
+
+## Actividad: Análisis de supervivencia usando el método KM en aquellos con vs sin diabetes en EPCM {.tabset .tabset-fade .tabset-pills}
+
+### Instrucciones
+
+Usando los ejemplos proporcionados arriba, haz una curva de supervivencia usando el método KM mostrando la supervivencia en aquellos con vs sin diabetes.
+
+La definición de diabetes que queremos usar incluye a todos aquellos con cualquiera de los siguientes criterios:
+
+1.  Un diagnóstico médico auto-reportado de diabetes (es decir, `base_diabetes=1`).\
+2.  Uso de medicación para diabetes (es decir, `drug_antidiabetic=1`).
+
+Específicamente:
+
+-   Haz la nueva definición de diabetes\
+-   Ajusta el modelo de supervivencia considerando diabetes como un grupo de riesgo\
+-   Grafica una curva de supervivencia\
+-   Calcula la probabilidad estimada de supervivencia a 20 años en aquellos con vs sin diabetes
+
+------------------------------------------------------------------------
+
+### Pista
+
+Para hacer la nueva definición de diabetes puedes usar este código:
+
+```{r}
+# Nombrar la nueva variable 
+dummy_df$new_diabetes <-
+  # Devuelve un vector con el valor máximo de los vectores de entrada
+  pmax(dummy_df$base_diabetes,
+       dummy_df$drug_antidiabetic,
+       # valores faltantes son removidos
+       na.rm = TRUE)
+```
+
+------------------------------------------------------------------------
+
+### Respuesta
+
+Hacer nueva definición de diabetes
+
+```{r}
+# Nombrar la nueva variable 
+dummy_df$new_diabetes <-
+  # Devuelve un vector con el valor máximo de los vectores de entrada
+  pmax(dummy_df$base_diabetes,
+       dummy_df$drug_antidiabetic,
+       # valores faltantes son removidos
+       na.rm = TRUE)
+```
+
+Ajustar modelo de supervivencia y graficar curva de supervivencia
+
+```{r, echo=TRUE}
+# Hacer la nueva variable un factor
+dummy_df$has_diabetes <- 
+  factor(dummy_df$new_diabetes,
+         levels = c(0,1),
+         labels = c("Sin diabetes", "Con diabetes"))
+
+# Usar la función survfit2 para hacer un nuevo objeto de supervivencia
+# Nota que el modelo incluye diabetes
+survfit2(Surv(person_years, d000) ~ has_diabetes, data = dummy_df) %>% 
+  # Usar la función ggsurvfit para hacer el gráfico usando ggplot2
+  ggsurvfit() +
+  # Agregar título y etiquetas 
+  labs(
+    title = "Supervivencia general en 20,000 participantes de EPCM\ncon edades de 35-84 años al reclutamiento, por estado de diabetes",
+    x = "Años desde el reclutamiento",
+    y = "Probabilidad de supervivencia general"
+    ) + 
+  # Agregar intervalos de confianza a las curvas
+  add_confidence_interval() +
+  # Agregar números en riesgo y eventos a lo largo del tiempo
+  add_risktable() + 
+  # Agregar un subtítulo con el resultado de una prueba de log-rank
+  add_pvalue(caption = "Log-rank {p.value}") +
+# Establecer el rango del eje y de 0 a 1
+  coord_cartesian(ylim = c(0, 1))
+```
+
+Calcular probabilidad estimada de supervivencia a 20 años por diabetes
+
+```{r}
+# probabilidad de supervivencia
+summary(
+  # Ajustar modelo de supervivencia
+  survfit(Surv(person_years, d000) ~ has_diabetes,data = dummy_df),
+  # Definir tiempo en años
+  times = 20)
+```
+
+En este estudio de 20,000 participantes similar a EPCM con edades de 35-84 años al reclutamiento, aquellos con diabetes tenían considerablemente menos probabilidad de sobrevivir hasta y más allá de 20 años después de su reclutamiento. Específicamente, la probabilidad de supervivencia a 20 años en aquellos *con* diabetes fue **57%**, comparado con una probabilidad de **85%** en aquellos *sin* diabetes.
+
+------------------------------------------------------------------------
+
+
+## Resumen
+
+**Este es el final de esta libreta de ejercicios prácticos.**  
+
+Durante este práctica:
+
+- Exploraste las variables clave disponibles en EPCM que son necesarias para realizar análisis de tiempo hasta evento.  
+- Aprendiste cómo crear objetos de supervivencia usando el paquete de R `survival`. Luego modelaste la supervivencia observada en el conjunto de datos `MCPS-like.csv`.  
+- Usaste el método de Kaplan-Meier para estimar la supervivencia general y estratificada y graficaste estos resultados usando `ggsurvfit`.  
+
+
+En el siguiente práctico aprenderás cómo implementar modelos de Cox de riesgos proporcionales, despues de la sesión teórica.
+
+Regresar a la [Tabla de Contenido](index.html).
+
+\newpage

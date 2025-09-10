@@ -1,0 +1,679 @@
+---
+title: "Visualización de resultados"
+course: "Análisis de Supervivencia en EPCM usando R"
+author: "Diego Aguilar-Ramirez & El Equipo EPCM"
+date: "`r format(Sys.Date())`"
+output:
+  rmdformats::readthedown:
+    code_folding: show
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    css: custom.css
+---
+
+```{r setup-ch2, echo=FALSE, include=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(devtools)
+#if (!require("emo")) devtools::install_github("hadley/emo")
+pacman::p_load(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+En esta libreta de ejercicios prácticos, aprenderás a:
+
+- Producir ***'linear plots'*** usando los resultados de algunos de los ejercicios de la práctica anterior.  
+- Seguir la documentación del paquete `ckbplotr` para hacer linear plots más elaborados y ***forest plots***.  
+
+## Agradecimientos  
+
+Los ejemplos mostrados aquí están en gran medida extraídos de la documentación del paquete de R `ckbplotr()`, desarrollado por [Neil Wright](https://www.ndph.ox.ac.uk/team/neil-wright) del China Kadoorie Biobank.  
+
+----------------------------------------------------------------
+
+# Flujo de trabajo para graficar  
+
+Graficar resultados generalmente sigue los siguientes pasos:
+
+1. Hacer el análisis  
+2. Extraer los números necesarios para graficar  
+3. Calcular números adicionales donde sea necesario  
+4. Construir un data frame  
+5. Hacer un gráfico básico
+6. Editar el gráfico según se requiera  
+
+----------------------------------------------------------------
+
+# Preparación
+
+Para esta práctica, se recomienda que comiences un nuevo script de R y una nueva sesión de R (es decir, empezar con un entorno global vacío).  
+
+## Crear script de R
+
+Abre el proyecto de R creado en el material previo al curso (es decir, `workshop.Rproj`).
+
+Ve a **File** \> **New File** \> **R Script**
+
+En el script **Untitled1** que acabas de crear, escribe:
+
+```{r}
+# Práctica 2
+# Autor: tu nombre va aquí
+# Última edición: 09/Oct/2025
+```
+
+Ahora, guardemos el script:
+
+-   Ve a **File** \> **Save As...** (nota que RStudio automáticamente abre en la ubicación del proyecto de R). Guarda el archivo de script en el directorio raíz del proyecto.\
+-   Guarda este script como `02.practico-2.R`.
+
+## Cargar datos
+
+Cargaré el conjunto de datos `mcps-like.csv` y limpiaré los nombres de las columnas de una vez.  
+
+```{r}
+# Cargar el paquete data.table, instalado en el material previo al curso
+pacman::p_load(data.table,tidyverse)
+
+# Cargar los datos simulados 'mcps-like.csv'
+dummy_df <- 
+  data.table::fread(file = 'data/mcps-like.csv') %>%
+  # limpiar nombres
+  janitor::clean_names()
+
+```
+
+Ahora, hagamos rápidamente todos los pasos de limpieza de datos en los que trabajamos durante la práctica 1.  
+
+**Pista:** ¡está bien copiar y pegar!  
+
+```{r}
+# Hacer una nueva variable de sexo como factor
+dummy_df$sex <- factor(ifelse(dummy_df$male == 1, "Hombres", "Mujeres"))
+
+# Nombrar la nueva variable 
+dummy_df$new_diabetes <-
+  # Devuelve un vector con el valor máximo de los vectores de entrada
+  pmax(dummy_df$base_diabetes,
+       dummy_df$drug_antidiabetic,
+       # valores faltantes son removidos
+       na.rm = TRUE)
+
+# Hacer las bandas de edad de 10 años
+dummy_df$age_10yr <- cut(dummy_df$age-0.5, 
+                         breaks = c(34, 44, 54, 64, 74, 84), 
+                         labels = c("35-44", "45-54", "55-64", "65-74", "75-84"),
+                         right = TRUE, 
+                         include.lowest = TRUE)
+
+dummy_df$edu_level_cat <- 
+  factor(dummy_df$edu_level,
+         levels = c(1, 2, 3, 4), 
+         labels = c("Universidad/Colegio", "Preparatoria", "Primaria", "Otro"))
+
+dummy_df$smokegp_cat <- 
+  factor(dummy_df$smokegp,
+         levels = c(1, 2, 3, 4, 5), 
+         labels = c("Nunca", "Ex-fumador", "<Diario", "Diario <10/d", "Diario 10+/d"))
+
+dummy_df$alcgp_cat <- 
+  factor(dummy_df$alcgp,
+         levels = c(1, 2, 3, 4, 5), 
+         labels = c("Nunca", "Ex-bebedor", "Hasta 3 veces/mes", "Hasta 2 veces/sem", "3+ veces/sem"))
+
+dummy_df$physgp_cat <- 
+  factor(dummy_df$physgp,
+         levels = c(1, 2, 3), 
+         labels = c("Ninguna", "Hasta 2 veces/sem", "3+ veces/sem"))
+```
+
+# 1. Crear un 'linear plot'
+
+Hagamos un gráfico de forma mostrando la asociación entre tabaquismo y mortalidad vascular de la práctica 1.  
+
+## Realiza el análisis  
+
+Primero, repitamos los análisis. 
+
+```{r}
+pacman::p_load(survival)
+smk_cox_mod<- 
+  # Definir modelo usando la función coxph 
+  coxph(
+    # El lado izquierdo de la ecuación incluye el seguimiento y la censura
+    Surv(person_years,d015) ~
+      # El lado derecho incluye todos los factores de interés
+      smokegp_cat + age_10yr + sex + coyoacan + edu_level_cat +  alcgp_cat + physgp_cat,
+      # Los datos a usar
+      data = dummy_df)
+```
+
+## Extraer los números necesarios
+
+Resumimos con `summary()` y ponemos los coeficientes en un data frame (usando el operador de extracción `$`). Solo estamos interesados en los coeficientes para tabaquismo, así que usamos solo las filas 1 a 4 (usando el operador de extracción `[,]`.).
+
+```{r}
+smk_mod_summary <- summary(smk_cox_mod)
+coefs <- smk_mod_summary$coefficients[1:4,]
+coefs <- as.data.frame(coefs)
+coefs
+```
+
+Nota que no hay coeficientes para los "Nunca fumadores", ya que esta grupo fue la referencia. Esto se vuelve relevante en los siguientes pasos.  
+
+## Construir un data frame  
+
+Haz la tabla que se necesita para graficar.  
+
+```{r}
+smoking_results <-
+  # Definir como un objeto data.frame
+  data.frame(
+    # Hacer los niveles del factor de riesgo como un factor 
+    smk_cat = factor(
+      c("Nunca","Ex-fumador","<Diario","Diario <10/d","Diario 10+/d"),
+      levels = c("Nunca","Ex-fumador","<Diario","Diario <10/d","Diario 10+/d")),
+    # Agregar manualmente un log(HR) de 0 para los Nunca Fumadores
+    est = c(0,coefs$coef),
+    # Agregar manualmente NULL para el error estándar de los Nunca Fumadores ya que no existe
+    se = c(0,coefs$`se(coef)`)
+  )
+```
+
+## Crear un gráfico básico  
+
+Si no está instalado, instala el paquete de R `ckbplotr`.  
+
+```{r}
+if(!require('ckbplotr')){
+  install.packages('ckbplotr',
+                 repos = c('https://neilstats.r-universe.dev',
+                           'https://cloud.r-project.org'))
+}
+```
+
+Ahora, usando el paquete `ckbpltr()`, haz un `shape_plot` básico con los `smoking_results`.  
+
+En este caso, queremos hacer un gráfico que muestre los HRs de mortalidad vascular asociados con los niveles de tabaquismo.  
+
+La manera más natural de mostrar esto es colocando los niveles de tabaquismo en el eje x y los HRs en el eje y.  
+
+También necesitamos pensar sobre el rango en cada eje. Hay cinco categorías para el eje x. Los coeficientes para el eje y son log(HRs), lo que significa que necesitan ser exponenciados. El rango en el eje y, en la escala natural, va desde aproximadamente 0.8 a 2 (necesitamos también considerar los intervalos de confianza).  
+
+Codifiquemos eso.  
+
+```{r}
+ckbplotr::shape_plot(
+  # Definir los datos a usar
+  data = smoking_results,
+  # Definir la columna con los valores para el eje x
+  col.x = "smk_cat",
+  # Definir los límites en el eje x. 
+  xlims = c(0.5,5.5),
+   # Definir los límites en el eje y. 
+  ylims = c(0.8,2),
+  # Definir la escala en el eje y
+  exponentiate = TRUE)
+```
+
+Una gran cosa sobre `ckbplotr` es que junto con el gráfico, produce el código ggplot2 usado para producir el gráfico.  
+
+Para aquellos que usan ggplot2 regularmente, este es un gran punto de partida en caso de que se desee una edición muy detallada.  
+
+## Editar el gráfico según sea necesario  
+
+Nota que el intervalo de confianza del cuarto cuadrado de izquierda a derecha cruza la línea del eje x. Sería mejor si no lo hiciera, así que necesitamos expandir el rango del eje.  
+
+También sería útil agregar algunas etiquetas a los ejes.  
+
+```{r}
+ckbplotr::shape_plot(smoking_results,
+                     col.x = "smk_cat",
+                     xlims = c(0.5,5.5),
+                     ylims = c(0.75,2),
+                     exponentiate = TRUE,
+                     xlab = "Tabaquismo",
+                     ylab = "Hazard Ratio\n(IC 95%)") 
+```
+
+Es buena práctica que el tamaño de los cuadrados refleje la cantidad de información estadística.  
+
+Configurar `scalepoints = TRUE` hace que el gráfico tenga un tamaño de punto (área) proporcional al inverso de la varianza (es decir, SE^2) de la estimación.  
+
+```{r}
+ckbplotr::shape_plot(smoking_results,
+                     col.x = "smk_cat",
+                     xlims = c(0.5,5.5),
+                     ylims = c(0.75,2),
+                     exponentiate = TRUE,
+                     xlab = "Tabaquismo",
+                     ylab = "Hazard Ratio\n(IC 95%)",
+                     scalepoints = TRUE) 
+```
+
+Sin embargo, esto no funciona del todo para el grupo de referencia, ya que agregamos manualmente un error estándar de 0. Recuerda que tuvimos que hacer esto porque `coxph()` (y otros modelos lineales) no proporcionan un error estándar para el grupo de referencia.  
+
+Elegir el grupo de referencia en análisis de riesgo categórico es un problema no trivial en epidemiología y bioestadística.  
+
+En muchos casos es apropiado usar el grupo de referencia "natural" (ej. pacientes no tratados/nunca fumadores) ya que usualmente hay interés en comparaciones con este grupo.  
+
+En otros casos puede ser más apropiado usar la categoría más grande como el grupo de referencia ya que esto ayudará a minimizar la varianza de los RRs resultantes (es decir, más observaciones o más eventos en un grupo dado, menos incertidumbre estadística alrededor de las estimaciones).  
+
+Cualquier grupo que se elija, los resultados solo permitirán a los lectores comparar riesgos en cada uno de los otros grupos con este grupo de referencia.  
+
+Entonces, ¿no hay solución?   
+
+## Riesgos absolutos flotantes 
+
+**Los riesgos absolutos flotantes** (FARs por sus siglas en inglés; floating absolute risks) producen parámetros y estimaciones de varianza que se refieren a RIESGOS LOG ESPECÍFICOS DEL GRUPO en lugar de **DIFERENCIAS** ENTRE RIESGOS LOG. 
+
+El cálculo de FARs está fuera del alcance de esta práctica. Los puntos clave a entender son que los FARs:
+
+- Nos permiten tratar log-RRs como "riesgos log específicos del grupo" (medidos desde el grupo de referencia) que son efectivamente independientes.  
+
+- Esto permite a los lectores comparar riesgos entre cualquiera de dos categorías (incluso si una no es la referencia) **Y** estimar tendencias.  
+
+- Esta forma de presentación es particularmente útil cuando no hay un grupo de referencia natural, o si el grupo de referencia natural es pequeño.  
+
+- Se pueden usar varios algoritmos para estimar las varianzas específicas del grupo (Easton et al, 1991; Plummer et al, 2004, Firth y de Menezes, 2004).  
+
+- Las estimaciones basadas en diferentes enfoques pueden variar ligeramente en ciertas circunstancias (ej. confusión sustancial) pero son generalmente similares.  
+
+**IMPORTANTE**: Al citar resultados de comparaciones específicas — se deben reportar SEs e ICs convencionales que tomen en cuenta la variación dentro de ambos grupos.  
+
+La función `float` en el paquete Epi puede ser usada para calcular varianzas flotantes (método Plummer).
+
+```{r, echo=TRUE}
+float <- Epi::float(smk_cox_mod)
+float
+```
+
+Nota que solo los Errores Estándar han cambiado (incluyendo un nuevo SE para los "Nunca Fumadores"), los coeficientes son idénticos.    
+
+Estos FARs pueden ser usados para producir nuestro gráfico:
+
+```{r, echo=TRUE}
+smoking_results <-
+  # Definir como un objeto data.frame
+  data.frame(
+    # Hacer los niveles del factor de riesgo como un factor 
+    smk_cat = factor(
+      c("Nunca","Ex-fumador","<Diario","Diario <10/d","Diario 10+/d"),
+      levels = c("Nunca","Ex-fumador","<Diario","Diario <10/d","Diario 10+/d")),
+    # Usar los coeficientes de float
+    est = float$coef,
+    # El SE es igual a la raíz cuadrada de la varianza
+    se = sqrt(float$var)
+  )
+
+ckbplotr::shape_plot(smoking_results,
+                     col.x = "smk_cat",
+                     xlims = c(0.5,5.5),
+                     ylims = c(0.75,2),
+                     exponentiate = TRUE,
+                     xlab = "Tabaquismo",
+                     ylab = "Hazard Ratio\n(IC 95%)",
+                     scalepoints = TRUE) 
+```
+
+Nota cómo cada uno de los cuadrados e ICs ahora reflejan la varianza dentro del logaritmo-del-riesgo en cada grupo.  
+
+## Continúa editando el gráfico según sea necesario  
+
+Hay bastantes problemas con las etiquetas para las marcas en el eje x. Para arreglar esto, se necesitará edición avanzada.  
+
+Para estas personalizaciones avanzadas, necesitamos usar ggplot2.  
+
+```{r}
+my_theme <- theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ckbplotr::shape_plot(smoking_results,
+                     col.x = "smk_cat",
+                     xlims = c(0.5,5.5),
+                     ylims = c(0.75,2),
+                     exponentiate = TRUE,
+                     xlab = "Tabaquismo",
+                     ylab = "Hazard Ratio\n(IC 95%)",
+                     scalepoints = TRUE,
+                     add = list(end = my_theme))
+
+
+```
+
+Este gráfico es realmente informativo y casi de calidad de publicación.  
+
+--------------------------------------------------------------------
+
+# 2. Ve más allá 
+
+Esta sección del práctico aún está en desarrollo. Como tal, algunas de las respuestas a los desafíos no tendrán muchos detalles.  
+
+Sin embargo, pensamos que sería bueno compartirlo contigo.  
+
+## Desafío de gráfico de forma {.tabset .tabset-fade .tabset-pills}
+
+### Instrucciones
+
+Este desafío tiene como objetivo integrar lo que aprendiste en los prácticas 1 y 2. 
+
+Necesitas estimar la asociación entre el índice de masa corporal (IMC) y mortalidad por todas las causas en participantes de la cohorte similar a EPCM **SIN** diabetes. Tus análisis deben ser ajustados por sexo, estatus socioeconómico y características de estilo de vida y estratificados por edad-en-riesgo. Tus análisis deberán estar limitados sólo a muertes que occurren en las edades de 35-74 años.  
+
+La diabetes debe ser definida como aquellos con diabetes diagnosticada auto-reportada, aquellos usando medicación antidiabética, o aquellos con una hemoglobina glycosilada (HbA1c) > 7%.
+
+### Respuesta
+
+Hacer nuevos grupos de factores de riesgo.  
+```{r}
+# Hacer agrupaciones de IMC de la OMS
+dummy_df$bmi <- with(dummy_df, weight / (height / 100)^2)
+
+dummy_df$whobmigp <- NA
+dummy_df$whobmigp[dummy_df$bmi < 18.5] <- 1  # bajo peso
+dummy_df$whobmigp[dummy_df$bmi >= 18.5 & dummy_df$bmi < 25] <- 2  # saludable
+dummy_df$whobmigp[dummy_df$bmi >= 25 & dummy_df$bmi < 30] <- 3  # sobrepeso
+dummy_df$whobmigp[dummy_df$bmi >= 30 & dummy_df$bmi < 35] <- 4  # obeso I
+dummy_df$whobmigp[dummy_df$bmi >= 35 & dummy_df$bmi < 40] <- 5  # obeso II
+dummy_df$whobmigp[dummy_df$bmi >= 40 & dummy_df$bmi < 60] <- 6  # obeso III
+
+dummy_df$whobmigp_fct <- factor(dummy_df$whobmigp,
+                            levels = c(1, 2, 3, 4, 5, 6),
+                            labels = c("Bajo peso", "Saludable", "Sobrepeso", "Obesidad I", "Obesidad II", "Obesidad III"))
+
+dummy_df$high_hba1c <- ifelse(dummy_df$base_hba1c > 7, 1, 0)
+
+dummy_df$diabetes <-
+  pmax(dummy_df$base_diabetes,
+       dummy_df$drug_antidiabetic,
+       dummy_df$high_hba1c, na.rm = TRUE)
+
+table(dummy_df$whobmigp)
+
+
+```
+
+Hacer variables necesarias para la expansión de Lexis y definir la función.  
+
+Solo en aquellos sin diabetes.  
+
+```{r, echo=TRUE}
+
+age_at_risk_df <- dummy_df[dummy_df$diabetes==0]
+
+# Hacer edad calendario 
+age_at_risk_df$calendar_age <- age_at_risk_df$age
+
+age_at_risk_df$study_date <- as.Date(rep("2000-01-01",dim(age_at_risk_df)[1]))
+
+age_at_risk_df$dob <- 
+  age_at_risk_df$study_date - round(365.25 * age_at_risk_df$age)
+
+age_at_risk_df$censoring_date <- 
+  age_at_risk_df$study_date + round(365.25 * age_at_risk_df$person_years)
+
+age_at_risk_df$csid          <- age_at_risk_df$patid
+age_at_risk_df$endpoint      <- age_at_risk_df$d000
+age_at_risk_df$endpoint_date <- age_at_risk_df$censoring_date
+age_at_risk_df$dob_anon      <- age_at_risk_df$dob
+
+expand_age_at_risk <- function(df, ages) {
+  df %>% 
+    
+    # mantener solo las columnas necesarias, para reducir requerimientos de memoria
+    select(csid, dob_anon, study_date, endpoint, endpoint_date) %>% 
+    
+    # remover incompletos
+    na.omit() %>% 
+    
+    # crear fila para cada participante y cada grupo de edad
+    crossing(tibble(XAgeGrp_start = ages[-length(ages)],
+                    XAgeGrp_end = ages[-1])) %>% 
+    mutate(XAgeGrp = (XAgeGrp_start + XAgeGrp_end)/2) %>% 
+    
+    # fecha de inicio de cada intervalo es cumpleaños (es decir, años calendario después de dob)
+    mutate(start_int = add_with_rollback(as.Date(dob_anon),
+                                         years(XAgeGrp_start),
+                                         roll_to_first = T)) %>%
+    
+    # remover intervalos que empiezan después de la fecha de censura
+    filter(start_int <= as.Date(endpoint_date)) %>% 
+    
+    # fecha de fin de cada intervalo es día antes del siguiente intervalo
+    mutate(end_int = add_with_rollback(as.Date(dob_anon),
+                                       years(XAgeGrp_end),
+                                       roll_to_first = T) - 1) %>% 
+    
+    # remover intervalos que terminan antes de entrar al estudio
+    filter(end_int >= as.Date(study_date)) %>%
+    
+    # corregir fecha de inicio y fin para intervalos parcialmente durante el estudio
+    mutate(start_int = pmax(as.Date(study_date), start_int),
+           end_int   = pmin(as.Date(endpoint_date), end_int)) %>%
+    
+    # endpoint solo puede ser 1 para el último intervalo
+    mutate(endpoint = as.numeric(end_int == as.Date(endpoint_date) & endpoint),
+           
+           # calcular días / años desde el inicio del estudio
+           ## terminar intervalos en + 0.95 como en 'sistema Cox de SAS'
+           t_start_days   = interval(as.Date(study_date), start_int) / days(1),
+           t_end_days     = interval(as.Date(study_date), end_int) / days(1) + 0.95,
+           time_in        = t_start_days / 365.25,
+           time_out       = t_end_days / 365.25)
+}
+```
+
+Hacer expansión de bandas de edad-en-riesgo (muertes a edades 35-74 años).  
+
+```{r}
+dataset_long <- 
+  expand_age_at_risk(df = age_at_risk_df,
+                     ages = c(35, 40, 45, 50, 55, 60, 65, 70, 75))
+
+dataset_long <- 
+  merge(dataset_long, 
+        age_at_risk_df
+        [, c("csid", "new_diabetes", "coyoacan", "male", "edu_level_cat",
+             "smokegp_cat", "alcgp_cat","physgp_cat","whobmigp","whobmigp_fct")])
+
+```
+
+Ejecutar modelo Cox PH.  
+
+```{r}
+bmi_cox_mod<- 
+  # Ajustar los modelos de regresión cox, con tiempos de inicio y fin
+  coxph(Surv(time_in, time_out, endpoint) ~ 
+          # Factor de riesgo de interés
+          relevel(factor(dataset_long$whobmigp), ref = 2) + 
+          # Otras covariables de interés
+          coyoacan + male +  edu_level_cat + smokegp_cat + alcgp_cat + physgp_cat +
+          # Estratos
+          strata(as.factor(XAgeGrp)),
+             data = dataset_long)
+summary(bmi_cox_mod)
+```
+
+Calcular FARs
+
+```{r}
+float <- Epi::float(bmi_cox_mod)
+float
+```
+
+Hacer data frame con números necesarios
+
+```{r}
+
+bmi_results <- 
+  # Definir como un objeto data.frame
+  data.frame(
+    # Hacer los niveles del factor de riesgo como un factor 
+    bmi_cat = as.numeric(names(float$coef)),
+    # Usar los coeficientes de float
+    est = float$coef,
+    # El SE es igual a la raíz cuadrada de la varianza
+    se = sqrt(float$var)
+  ) 
+
+bmi_results <- bmi_results[order(bmi_results$bmi_cat, decreasing = FALSE), ]
+# Calcular IMC promedio en cada nivel de whobmicat
+mean_by_bmicat <- 
+  tapply(age_at_risk_df$bmi, age_at_risk_df$whobmigp, mean) %>%
+  as.data.frame() 
+names(mean_by_bmicat) <- "mean"
+mean_by_bmicat$bmi_cat <- row.names(mean_by_bmicat)
+
+bmi_results <- merge(bmi_results,mean_by_bmicat)
+```
+
+Hacer gráfico. 
+```{r}
+ckbplotr::shape_plot(bmi_results,
+                     col.x = "mean",
+                     xlims = c(15,50),
+                     ylims = c(0.5,4.5),
+                     ybreaks = c(0.5,1.0,2.0,4.0),
+                     exponentiate = TRUE,
+                     xlab = "IMC",
+                     ylab = "Hazard Ratio\n(IC 95%)",
+                     scalepoints = TRUE) 
+
+```
+
+Tómate tu tiempo para inspeccionar este gráfico y considerar los puntos buenos (y los malos).  
+
+Incluso con una muestra inicial de 20,000 participantes, parece que realmente no tenemos suficiente poder para evaluar la asociación de IMC y mortalidad por debajo del rango de IMC de 20 kg/m^2.  
+
+---------------------------------------------------------------------------------
+
+## Construcción de tablas de resultados 
+
+Construir y exportar tablas de resultados cuando se hacen análisis con R sigue los siguientes pasos básicos:
+
+1. Hacer el análisis
+2. Extraer números de interés de por ejemplo un objeto de modelo ajustado
+3. Calcular números adicionales
+4. Formatear números
+5. Construir un data frame
+6. Hacer del data frame una tabla
+7. Mostrar la tabla en un archivo
+
+En la práctica, los pasos de abajo pueden ser codificados más concisamente y puedes refinar tu propio código para tus necesidades y flujo de trabajo.
+
+## Análisis de ejemplo
+
+Empecemos usando `glm()` para ajustar un modelo simple de regresión logística para usar como ejemplo.  
+```{r}
+model <- glm(formula = am ~ cyl + hp + wt, family = binomial, data = mtcars)
+```
+
+## Extraer números de interés
+
+```{r}
+model_summary <- summary(model)
+coefs <- model_summary$coefficients[2:4,]
+coefs <- as.data.frame(coefs)
+```
+
+Agregar una nueva columna con nombres para cada fila:
+```{r}
+coefs$name <- c("Numero de cilindros", "Caballos de fuerza brutos", "Peso (1000lbs)")
+coefs
+```
+
+## Calcular otros números
+
+Calcular nuevas columnas de odds ratios y los límites de intervalos de confianza del 95%.
+```{r}
+coefs$OR <- exp(coefs$Estimate)
+coefs$L_OR <- exp(coefs$Estimate - 1.96 * coefs$`Std. Error`)
+coefs$U_OR <- exp(coefs$Estimate + 1.96 * coefs$`Std. Error`)
+coefs
+```
+
+## Formatear números
+Usualmente queremos presentar números redondeados y en un formato bonito. Los paquetes para crear tablas (como `kable` discutido abajo) pueden hacer esto, pero también puedes hacerlo tú mismo con funciones como `round`, `format`, y `paste`.
+
+Usa `round` para redondear los ORs a 2 lugares decimales:
+```{r}
+coefs$OR <- round(coefs$OR, 2)
+coefs
+```
+
+Usa `format` para convertir números en texto. Configuraremos `nsmall` para que los números siempre se impriman con dos dígitos a la derecha del punto decimal (coincidiendo con el redondeo). También configuraremos `trim = TRUE` para remover espacios en blanco al inicio.
+```{r}
+coefs$OR <- format(coefs$OR, nsmall = 2, trim = TRUE)
+coefs
+```
+
+Para los límites del intervalo de confianza, haremos ambos pasos en uno:
+```{r}
+coefs$L_OR <- format(round(coefs$L_OR, 2), nsmall = 2, trim = TRUE)
+coefs$U_OR <- format(round(coefs$U_OR, 2), nsmall = 2, trim = TRUE)
+coefs
+```
+
+Ahora podemos usar `paste` para juntar los ORs y límites de confianza:
+```{r}
+coefs$OR_CI <- paste(coefs$OR, " (", coefs$L_OR, ", ", coefs$U_OR, ")", sep = "")
+coefs
+```
+
+Nota que `paste0` es equivalente a `paste(..., sep = "")`.
+
+Sigamos los mismos pasos para los valores de p. Vamos a usar la función `ifelse` para presentar valores pequeños como "<0.01".
+```{r}
+coefs$p <- ifelse(coefs$`Pr(>|z|)` < 0.01, "<0.01", format(round(coefs$`Pr(>|z|)`, 2), nsmall = 2))
+coefs
+```
+
+## Construir un data frame
+Para preparar una tabla, podemos seleccionar un subconjunto de filas y columnas del data frame coefs.
+```{r}
+table <- coefs[1:2, c("name", "OR_CI", "p")]
+table
+```
+
+## Hacer una tabla
+Varios paquetes de R están disponibles para crear una tabla formateada adecuada para presentación a partir de un data frame.  
+
+El paquete `flextable` es particularmente útil para crear tablas que se mostrarán en documentos de Word.  
+
+```{r, eval=FALSE}
+pacman::p_load(flextable,officer)
+# Crear un objeto flextable del data frame
+ft <- flextable(table)
+
+# Guardar la flextable como un documento de Word
+doc <- read_docx() %>% 
+  body_add_flextable(ft) %>% 
+  print(target = "flextable_table.docx")
+```
+
+Ver la documentación para flextable [aquí](https://www.rdocumentation.org/packages/flextable/versions/0.9.5).
+
+## Generar un archivo con R Markdown
+Después de construir y crear una tabla en R, querremos presentar la tabla en un documento. R Markdown puede ser usado para esto.
+
+Markdown es un lenguaje de marcado que te permite agregar formato simple a un archivo de texto plano. R Markdown te permite insertar chunks de código R también, que serán ejecutados cuando conviertas el archivo a un documento PDF, HTML o Word. Puedes aprender sobre R markdown desde RStudio en https://rmarkdown.rstudio.com. Un libro de referencia extensivo es [R Markdown: The Definitive Guide](https://bookdown.org/yihui/rmarkdown/).
+
+Puedes incluir el código para análisis y crear tablas en un documento de R Markdown. El código R se incluye poniéndolo entre delimitadores de chunk ```` ```{r} ```` y ```` ``` ````. Las opciones de chunk te permiten elegir cuándo el código y/o la salida se muestra en el documento final.
+
+Convierte el archivo R Markdown a un documento PDF, HTML, o Word abriéndolo con RStudio y haciendo clic en el botón Knit (usa la flecha desplegable para seleccionar el tipo de archivo). O usa la función `render` del paquete rmarkdown.
+
+Si quieres tener tu código de análisis separado, puedes guardar tu tabla en un archivo...
+```{r, eval = FALSE}
+saveRDS(my_table, file = "my_table.rds")
+```
+
+...y luego leerlo en el documento R Markdown:
+```{r, eval = FALSE}
+readRDS("my_table.rds")
+```
+
+Si debes generar un documento de Word, entonces usar un "documento de referencia de estilo" es muy útil (ver https://bookdown.org/yihui/rmarkdown/word-document.html).
+
+Regresar a la [Tabla de Contenido](index.html).
+
+\newpage

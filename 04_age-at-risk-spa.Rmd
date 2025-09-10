@@ -1,0 +1,395 @@
+---
+title: "Análisis de edad-en-riesgo"
+course: "Análisis de Supervivencia en EPCM usando R"
+author: "Diego Aguilar-Ramirez & El Equipo EPCM"
+date: "`r format(Sys.Date())`"
+output:
+  rmdformats::readthedown:
+    code_folding: show
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    css: custom.css
+---
+
+```{r setup-ch1, echo=FALSE, include=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(devtools)
+#if (!require("emo")) devtools::install_github("hadley/emo")
+pacman::p_load(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+En esta libreta de ejercicios prácticos, revisaremos los conceptos cubiertos en las sesión "Análisis de edad-en-riesgo", incluyendo:
+
+1.  **Correr modelos de Cox de RP en R.**\
+2.  **Evaluar los supuestos de los modelos.**
+
+
+## Cargar los datos  
+
+Si reiniciaste tu sesión entre la práctica anterior y esta, tendrás que cargar los datos de nuevo, "limpiar" los nombres de las columnas, y generar de nuevo algunas de las columnas que usaremos.  
+
+
+```{r, echo = TRUE}
+# Cargar el paquete data.table, instalado en el material previo al curso
+pacman::p_load(data.table,janitor)
+
+# Cargar los datos simulados 'MCPS-like.csv'
+dummy_df <- data.table::fread(file = 'data/MCPS-like.csv') 
+dummy_df <- janitor::clean_names(dummy_df)
+
+# Nombrar la nueva variable 
+dummy_df$new_diabetes <-
+  # Devuelve un vector con el valor máximo de los vectores de entrada
+  pmax(dummy_df$base_diabetes,
+       dummy_df$drug_antidiabetic,
+       # valores faltantes son removidos
+       na.rm = TRUE)
+
+# Hacer la nueva variable un factor
+dummy_df$has_diabetes <- 
+  factor(dummy_df$new_diabetes,
+         levels = c(0,1),
+         labels = c("Sin diabetes", "Con diabetes"))
+
+# Hacer una nueva variable de sexo como factor
+dummy_df$sex <- factor(ifelse(dummy_df$male == 1, "Hombres", "Mujeres"))
+
+# Edad
+dummy_df$age_10yr <- 
+  cut(
+    # Restar 0.5 para ajustar por truncamiento de edad
+    dummy_df$age-0.5,                    
+    # Puntos de corte que definen los límites de intervalos
+    breaks = c(34, 44, 54, 64, 74, 84),  
+    # Etiquetas personalizadas para cada banda de edad
+    labels = c("35-44", "45-54", "55-64", "65-74", "75-84"), 
+    # Intervalos cerrados por la derecha (excluye izq, incluye der)
+    right = TRUE,                         
+     # Incluir el punto de corte más bajo en el primer intervalo
+    include.lowest = TRUE)  
+
+# Nivel educativo
+dummy_df$edu_level_cat <- 
+  factor(dummy_df$edu_level,
+         levels = c(1, 2, 3, 4), 
+         labels = c("Universidad", "Preparatoria", "Primaria/Secundaria", "Otro"))
+
+# Tabaquismo
+dummy_df$smokegp_cat <- 
+  factor(dummy_df$smokegp,
+         levels = c(1, 2, 3, 4, 5), 
+         labels = c("Nunca", "Ex-fumador", "<Diario", "Diario <10/día", "Diario 10+/día"))
+
+# Consumo de alcohol
+dummy_df$alcgp_cat <- 
+  factor(dummy_df$alcgp,
+         levels = c(1, 2, 3, 4, 5), 
+         labels = c("Nunca", "Ex-bebedor", "Hasta 3 veces/mes", "Hasta 2 veces/sem", "3+ veces/sem"))
+
+# Actividad física
+dummy_df$physgp_cat <- 
+  factor(dummy_df$physgp,
+         levels = c(1, 2, 3), 
+         labels = c("Ninguna", "Hasta 2 veces/sem", "3+ veces/sem"))
+
+```
+
+# Análisis de edad-en-riesgo
+
+## Repaso
+
+En epidemiología, la **edad** es el factor confusor más común de cualquier asociación entre un factor de riesgo y enfermedad, ya que la mayoría de los factores de riesgo y el riesgo de enfermedad cambian considerablemente con la edad.
+
+Usualmente, la edad registrada al inicio del estudio (**edad-al-inicio**) será ajustada en el modelo para tomar en cuenta el efecto de la edad en el riesgo.
+
+Sin embargo, ajustar por el efecto de la edad 'adquirida' durante el estudio (**edad-en-riesgo**) puede ser más apropiado porque es la edad-en-riesgo la que determina el riesgo actual en lugar de la edad cuando el factor de riesgo fue medido o determinado.
+
+## Preparar datos para expansión de Lexis
+
+La función de expansión de datos usa el paquete `lubridate` y otros paquetes de tidyverse, así que estos son requeridos.
+
+Este ejemplo requiere el paquete `survival` para ajustar el modelo de Cox.
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+pacman::p_load(tidyverse,lubridate,survival,Epi)
+```
+
+Hagamos un nuevo conjunto de datos llamado `age_at_risk_df`
+
+```{r}
+age_at_risk_df <- dummy_df
+```
+
+### Edad calendario
+
+Para estos análisis, necesitas crear una edad "calendario" a partir de la edad reportada. Cuando un participante reporta su edad, la mayoría de ellos será ligeramente mayor que la edad reportada. Para corregir esto, agregamos 0.5 a cada edad ya que, en promedio, los participantes serán 6 meses mayores que su edad reportada.  
+
+**NOTA**: Esto no es necesario cuando el estudio proporciona fechas de nacimiento o cuando la edad es calculada a partir de la fecha de nacimiento.  
+
+Para este tutorial, la columna `age` es de hecho la "edad calendario".
+
+```{r}
+# Hacer edad calendario 
+age_at_risk_df$calendar_age <- age_at_risk_df$age
+```
+
+## Expandir datos por edad-en-riesgo
+
+La función `expand_age_at_risk()` (ver abajo) llevará a cabo una expansión de Lexis en el 'data frame' proporcionado, para que cada individuo tenga filas para cada banda de edad-en-riesgo. Asume que el 'data frame' contiene columnas nombradas:
+
+-   csid - ID del participante
+-   dob_anon - fecha de nacimiento
+-   study_date - fecha de entrada al estudio
+-   endpoint - variable binaria indicando el punto final
+-   endpoint_date - fecha del evento del punto final/censura
+
+Necesitamos crear algunas de estas columnas a partir de los datos existentes en 'MCPS-like'.  
+
+Podemos crear una **fecha de estudio** fija "ficticia".  
+
+```{r}
+age_at_risk_df$study_date <- as.Date(rep("2000-01-01",20000))
+```
+
+A partir de esta **fecha de estudio** fija, tenemos que entonces calcular la fecha de nacimiento (**dob**; que no está disponible en EPCM) restando la edad en años a la fecha de estudio que creamos.  
+
+```{r}
+age_at_risk_df$dob <- 
+  age_at_risk_df$study_date - round(365.25 * age_at_risk_df$age)
+```
+
+Ahora tenemos que crear una **fecha de censura** agregando `person_years` a la `study_date`.  
+
+```{r}
+age_at_risk_df$censoring_date <- 
+  age_at_risk_df$study_date + round(365.25 * age_at_risk_df$person_years)
+```
+Nota que para todos los análisis anteriores, hemos estado usando la variable de personas-año (así que realmente no hemos usado ninguna fecha).  
+
+Ahora, necesitamos asegurarnos que las nuevas columnas necesarias para la expansión de Lexis sean creadas con los nombres que la función necesita:
+
+```{r}
+age_at_risk_df$csid          <- age_at_risk_df$patid
+age_at_risk_df$endpoint      <- age_at_risk_df$d000
+age_at_risk_df$endpoint_date <- age_at_risk_df$censoring_date
+age_at_risk_df$dob_anon      <- age_at_risk_df$dob
+```
+
+La función puede ser modificada para usar diferentes nombres o para permitir al usuario especificar nombres al llamar la función. La función usa `as.Date()` en las fechas, por si las columnas no están en datetime que sean convertidas - pero es buena idea asegurarse que las variables de fecha sean del tipo correcto inicialmente.
+
+Las bandas de edad-en-riesgo son elegidas especificando un vector de puntos de corte. El primero será la edad mínima-en-riesgo para entrar al análisis, y el último será la edad a la cual los participantes dejan el análisis. (Por ejemplo, `c(30, 50, 80)` usará bandas de edad-en-riesgo de 30-49 años y 50-79 años.)
+
+## Definir la función
+
+```{r, echo=TRUE}
+expand_age_at_risk <- function(df, ages) {
+  df %>% 
+    
+    # mantener solo las columnas necesarias, para reducir requerimientos de memoria
+    select(csid, dob_anon, study_date, endpoint, endpoint_date) %>% 
+    
+    # remover incompletos
+    na.omit() %>% 
+    
+    # crear fila para cada participante y cada grupo de edad
+    crossing(tibble(XAgeGrp_start = ages[-length(ages)],
+                    XAgeGrp_end = ages[-1])) %>% 
+    mutate(XAgeGrp = (XAgeGrp_start + XAgeGrp_end)/2) %>% 
+    
+    # fecha de inicio de cada intervalo es cumpleaños (es decir, años calendario después de dob)
+    mutate(start_int = add_with_rollback(as.Date(dob_anon),
+                                         years(XAgeGrp_start),
+                                         roll_to_first = T)) %>%
+    
+    # remover intervalos que empiezan después de la fecha de censura
+    filter(start_int <= as.Date(endpoint_date)) %>% 
+    
+    # fecha de fin de cada intervalo es día antes del siguiente intervalo
+    mutate(end_int = add_with_rollback(as.Date(dob_anon),
+                                       years(XAgeGrp_end),
+                                       roll_to_first = T) - 1) %>% 
+    
+    # remover intervalos que terminan antes de entrar al estudio
+    filter(end_int >= as.Date(study_date)) %>%
+    
+    # corregir fecha de inicio y fin para intervalos parcialmente durante el estudio
+    mutate(start_int = pmax(as.Date(study_date), start_int),
+           end_int   = pmin(as.Date(endpoint_date), end_int)) %>%
+    
+    # endpoint solo puede ser 1 para el último intervalo
+    mutate(endpoint = as.numeric(end_int == as.Date(endpoint_date) & endpoint),
+           
+           # calcular días / años desde el inicio del estudio
+           ## terminar intervalos en + 0.95 como en 'sistema Cox de SAS'
+           t_start_days   = interval(as.Date(study_date), start_int) / days(1),
+           t_end_days     = interval(as.Date(study_date), end_int) / days(1) + 0.95,
+           time_in        = t_start_days / 365.25,
+           time_out       = t_end_days / 365.25)
+}
+```
+
+## Correr el ejemplo de modelo estratificado por edad-en-riesgo
+
+Llama la función usando como entrada el conjunto de datos `age_at_risk_df`.
+
+Para este ejemplo, queremos estratificar nuestros análisis por grupos de edad-en-riesgo de 5 años. solo estaremos interesados en eventos que ocurran a edades de **35 a 74** años.  
+
+Nota que los análisis previos no restringieron participantes basándose en su edad al reclutamiento.
+
+```{r}
+dataset_long <- 
+  expand_age_at_risk(df = age_at_risk_df,
+                     ages = c(35, 40, 45, 50, 55, 60, 65, 70, 75))
+
+head(dataset_long, n = 50)
+```
+Tómate tu tiempo para revisar las filas.  
+
+Nota cómo cada participante (denotado por valores únicos de `csid`) ahora tiene múltiples filas, una para cada banda de edad-en-riesgo.  
+
+Importantemente, fíjate cómo los participantes que murieron a los 75 años o más fueron censurados en la fecha cuando cumplieron 75.  
+
+## Combinar columnas
+
+El data frame expandido no contiene la columna del factor de riesgo o ninguna covariable, así que estas deberían ahora ser combinadas en el data frame.
+
+```{r, echo=TRUE}
+dataset_long <- 
+  merge(dataset_long, 
+        age_at_risk_df
+        [, c("csid", "has_diabetes", "coyoacan", "male", "edu_level_cat",
+             "smokegp_cat", "alcgp_cat","physgp_cat")])
+```
+
+## Corre modelo de riesgos proporcionales de Cox
+
+El data frame expandido contiene la columna `XAgeGrp` que puede ser usada para estratificar el modelo de riesgos proporcionales de Cox, y columnas de tiempo para especificar el tiempo de inicio y fin para intervalos.
+
+El factor de riesgo categórico está almacenado como un factor, así que será tratado como una variable predictora categórica.
+
+```{r, echo=TRUE}
+cox_mod_4 <- 
+  # Ajustar los modelos de regresión cox, con tiempos de inicio y fin
+  coxph(Surv(time_in, time_out, endpoint) ~ 
+          # Factor de riesgo de interés
+          has_diabetes + 
+          # Otras covariables de interés
+          coyoacan + male +  edu_level_cat + smokegp_cat + alcgp_cat + physgp_cat +
+          # Estratos
+          strata(as.factor(XAgeGrp)),
+             data = dataset_long)
+summary(cox_mod_4)
+```
+Nota que el número de filas es considerablemente mayor que el número de participantes. Sin embargo, el número de eventos debería coincidir.  
+
+Como estos análisis solo consideraron muertes ocurridas antes de los 75 años, para calcular este número por niveles del factor de riesgo necesitamos ser súmamente cuidadosos. Sólo queremos contar las muertes que pasaron en este período, lo cual podemos hacer usando las variables `age` y `person_years`. 
+
+Nota que esto funciona **únicamente** porque usamos estas mismas variables para crear las fechas "ficticias" necesarias para la expansión de Lexis.  
+
+```{r}
+# Filtrar los datos donde age + person_years es menor que 75
+filtered_data <- 
+  age_at_risk_df[age_at_risk_df$age + age_at_risk_df$person_years < 75, ]
+
+# Calcular el número de eventos para cada nivel de has_diabetes
+table(filtered_data$has_diabetes, filtered_data$d000)
+
+```
+# Actividad: Tabaquismo y mortalidad vascular {.tabset .tabset-fade .tabset-pills}
+
+## Instrucciones
+
+Usando los ejemplos proporcionados arriba, estima la asociación entre **tabaquismo** al reclutamiento y mortalidad **vascular** estratificada por edad-en-riesgo.
+
+Para este análisis, **ajustarás** por los siguientes factores de confusión incluyéndolos en el modelo de regresión:
+
+-   Edad\
+-   Sexo\
+-   Distrito de residencia\
+-   Nivel educativo\
+-   Consumo de alcohol y actividad física
+
+------------------------------------------------------------------------
+
+## Pista
+
+El resultado vascular está definido por la columna `d015`.  
+
+Puedes usar el `age_at_risk_df`, pero necesitarás actualizar las columnas necesarias por la función de expansión de Lexis (ya que ahora estás interesado en un resultado diferente).  
+
+------------------------------------------------------------------------
+
+## Respuesta
+
+Actualizar las columnas para esta actividad.  
+
+De todas las columnas necesarias, la única que necesita actualización es la columna `endpoint`.
+
+```{r}
+age_at_risk_df$csid          <- age_at_risk_df$patid
+age_at_risk_df$endpoint      <- age_at_risk_df$d015
+age_at_risk_df$endpoint_date <- age_at_risk_df$censoring_date
+age_at_risk_df$dob_anon      <- age_at_risk_df$dob
+```
+Hacer la expansión de Lexis.  
+
+```{r}
+dataset_long_2 <- 
+  expand_age_at_risk(df = age_at_risk_df,
+                     ages = c(35, 40, 45, 50, 55, 60, 65, 70, 75))
+```
+Combinar columnas
+```{r, echo=TRUE}
+dataset_long_2 <- 
+  merge(dataset_long_2, 
+        age_at_risk_df
+        [, c("csid", "has_diabetes", "coyoacan", "male", "edu_level_cat",
+             "smokegp_cat", "alcgp_cat","physgp_cat")])
+```
+
+Correr el modelo usando `coxph()` y el conjunto de datos expandido.  
+
+```{r, echo=TRUE}
+cox_mod_5 <- 
+  # Ajustar los modelos de regresión cox, con tiempos de inicio y fin
+  coxph(Surv(time_in, time_out, endpoint) ~ 
+          # Factor de riesgo de interés
+          smokegp_cat + 
+          # Otras covariables de interés
+          coyoacan + male +  edu_level_cat + alcgp_cat + physgp_cat +
+          # Estratos
+          strata(as.factor(XAgeGrp)),
+             data = dataset_long_2)
+summary(cox_mod_5)
+```
+
+```{r}
+# Filtrar los datos donde age + person_years es menor que 75
+filtered_data <- 
+  age_at_risk_df[age_at_risk_df$age + age_at_risk_df$person_years < 75, ]
+
+# Calcular el número de eventos para cada nivel de has_diabetes
+table(filtered_data$smokegp_cat, filtered_data$d015)
+
+```
+Trata de interpretar los resultados tú mismo.  
+
+# Resumen
+
+**Este es el final de esta libreta de ejercicios prácticos.**  
+
+Durante esta práctica:
+
+- Aprendiste cómo hacer una **expansión de Lexis**.  
+- Realizaste modelos Cox PH estratificados por **edad-en-riesgo**.  
+
+
+En el siguiente práctico aprenderás cómo hacer algunas tablas básicas para presentar tus resultados. También aprenderás cómo hacer **shape plots** y **forest plots** usando el paquete `ckbplotr()`.
+
+Regresar a la [Tabla de Contenido](index.html).
+
+\newpage

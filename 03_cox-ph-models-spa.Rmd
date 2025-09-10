@@ -1,0 +1,378 @@
+---
+title: "Modelos de Cox de Riesgos Proporcionales"
+course: "Análisis de Supervivencia en EPCM usando R"
+author: "Diego Aguilar-Ramirez & El Equipo EPCM"
+date: "`r format(Sys.Date())`"
+output:
+  rmdformats::readthedown:
+    code_folding: show
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    css: custom.css
+---
+
+```{r setup-ch1, echo=FALSE, include=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(devtools)
+#if (!require("emo")) devtools::install_github("hadley/emo")
+pacman::p_load(knitr)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+En esta libreta de ejercicios prácticos, revisaremos los conceptos cubiertos en las sesión "Modelos de Cox de Riesgos Proporcionales", incluyendo:
+
+1.  **Correr modelos de Cox de RP en R.**\
+2.  **Evaluar los supuestos de los modelos.**
+
+## Cargar los datos  
+
+Si reiniciaste tu sesión entre la práctica anterior y esta, tendrás que cargar los datos de nuevo, "limpiar" los nombres de las columnas, y generar de nuevo algunas de las columnas que usaremos.  
+
+
+```{r, echo = TRUE}
+# Cargar el paquete data.table, instalado en el material previo al curso
+pacman::p_load(data.table,janitor)
+
+# Cargar los datos simulados 'MCPS-like.csv'
+dummy_df <- data.table::fread(file = 'data/MCPS-like.csv') 
+dummy_df <- janitor::clean_names(dummy_df)
+
+# Nombrar la nueva variable 
+dummy_df$new_diabetes <-
+  # Devuelve un vector con el valor máximo de los vectores de entrada
+  pmax(dummy_df$base_diabetes,
+       dummy_df$drug_antidiabetic,
+       # valores faltantes son removidos
+       na.rm = TRUE)
+
+# Hacer la nueva variable un factor
+dummy_df$has_diabetes <- 
+  factor(dummy_df$new_diabetes,
+         levels = c(0,1),
+         labels = c("Sin diabetes", "Con diabetes"))
+
+# Hacer una nueva variable de sexo como factor
+dummy_df$sex <- factor(ifelse(dummy_df$male == 1, "Hombres", "Mujeres"))
+
+```
+
+
+# 1. Riesgos Proporcionales de Cox
+
+Hasta ahora, hemos descrito la probabilidad de supervivencia con respecto a **un factor** (ej. sexo o diabetes). Sin embargo, sabemos que varios factores o covariables conocidos afectan la supervivencia (ej. edad, estatus socioeconómico, factores de estilo de vida como tabaquismo o consumo de alcohol).
+
+Como se discutió en la clase, la regresión de Riesgos Proporcionales de Cox permite que la supervivencia sea evaluada con respecto a varios factores simultáneamente.
+
+También ofrece estimaciones de la fuerza del efecto de cada factor.
+
+## Diabetes y mortalidad por todas las causas
+
+Estamos interesados en estimar la asociación entre diabetes al reclutamiento y mortalidad por todas las causas.
+
+Para este análisis, 'ajustaremos' por los siguientes **factores confusores** incluyéndolos en el modelo de regresión:
+
+-   Edad\
+-   Sexo\
+-   Distrito de residencia\
+-   Nivel educativo\
+-   Tabaquismo, consumo de alcohol, y actividad física
+
+Basándose en una gran cantidad de evidencia científica, es razonable asumir que los factores arriba pueden ser considerados factores confusores *conocidos*. Eso significa que estos factores están asociados (causalmente) con tanto la exposición (es decir, diabetes) como el desenlace (es decir, muerte).
+
+Discutir el concepto de confusión en epidemiología está fuera del alcance de este práctico, pero [esta es una buena introducción](https://www.healthknowledge.org.uk/public-health-textbook/research-methods/1a-epidemiology/biases).
+
+### Preparar covariables
+
+Sigue los pasos abajo para preparar las covariables a ser incluidas en el modelo principal.  
+
+**Edad, sexo, y distrito de residencia**
+
+```{r}
+summary(dummy_df$age)
+summary(dummy_df$male)
+summary(dummy_df$coyoacan)
+```
+
+Para este análisis, modelaremos la edad (`age`) como una variable categórica (bandas de edad de 10 años).
+
+```{r}
+dummy_df$age_10yr <- 
+  cut(
+    # Restar 0.5 para ajustar por truncamiento de edad
+    dummy_df$age-0.5,                    
+    # Puntos de corte que definen los límites de intervalos
+    breaks = c(34, 44, 54, 64, 74, 84),  
+    # Etiquetas personalizadas para cada banda de edad
+    labels = c("35-44", "45-54", "55-64", "65-74", "75-84"), 
+    # Intervalos cerrados por la derecha (excluye izq, incluye der)
+    right = TRUE,                         
+     # Incluir el punto de corte más bajo en el primer intervalo
+    include.lowest = TRUE)               
+
+# Verificar que no se crearon NAs
+table(dummy_df$age_10yr,useNA = "always")
+```
+
+Sexo (`male`) y distrito de residencia (`coyoacan`) mantendrán su código actual. No se necesitan más cambios para estas variables.
+
+**Nivel educativo**
+
+Para facilitar esta práctica, esta variable ya ha sido codificada en 4 niveles:\
+1. Universidad\
+2. Preparatoria\
+3. Primaria y Secundaria\
+4. Otro
+
+Solo necesitamos decirle a R que trate esto como un `factor` para que entienda que es una variable categórica.
+
+```{r}
+summary(dummy_df$edu_level)
+table(dummy_df$edu_level)
+
+dummy_df$edu_level_cat <- 
+  factor(dummy_df$edu_level,
+         levels = c(1, 2, 3, 4), 
+         labels = c("Universidad", "Preparatoria", "Primaria/Secundaria", "Otro"))
+
+summary(dummy_df$edu_level_cat)
+```
+
+**Tabaquismo, consumo de alcohol, y actividad física**
+
+Similar a lo anterior, necesitamos decirle a R que éstas son variables categóricas y agregar etiquetas.
+
+```{r}
+# Tabaquismo
+summary(dummy_df$smokegp)
+table(dummy_df$smokegp)
+
+dummy_df$smokegp_cat <- 
+  factor(dummy_df$smokegp,
+         levels = c(1, 2, 3, 4, 5), 
+         labels = c("Nunca", "Ex-fumador", "<Diario", "Diario <10/día", "Diario 10+/día"))
+
+summary(dummy_df$smokegp_cat)
+
+# Consumo de alcohol
+summary(dummy_df$alcgp)
+table(dummy_df$alcgp)
+
+dummy_df$alcgp_cat <- 
+  factor(dummy_df$alcgp,
+         levels = c(1, 2, 3, 4, 5), 
+         labels = c("Nunca", "Ex-bebedor", "Hasta 3 veces/mes", "Hasta 2 veces/sem", "3+ veces/sem"))
+
+summary(dummy_df$alcgp_cat)
+
+# Actividad física
+summary(dummy_df$physgp)
+table(dummy_df$physgp)
+
+dummy_df$physgp_cat <- 
+  factor(dummy_df$physgp,
+         levels = c(1, 2, 3), 
+         labels = c("Ninguna", "Hasta 2 veces/sem", "3+ veces/sem"))
+
+summary(dummy_df$physgp_cat)
+
+```
+
+### Correr un modelo de Cox univariado
+
+Para empezar, podría ser útil explorar la asociación entre diabetes y mortalidad por todas las causas **sin** incluir factores de confusión.
+
+```{r}
+pacman::p_load(survival)
+cox_mod_1 <- 
+  # Definir modelo usando la función coxph 
+  coxph(
+    # El lado izquierdo de la ecuación incluye el seguimiento y la censura
+    Surv(person_years,d000) ~
+      # El lado derecho incluye todos los factores de interés
+      has_diabetes,
+      # Los datos a usar
+      data = dummy_df)
+
+# Usar summary para mostrar los resultados clave
+summary(cox_mod_1)
+```
+
+Los resultados guardados en `cox_mod_1` muestran que los datos usados involucraron **20,000** participantes y **3,694** eventos.
+
+Los coeficientes mostrados son el $log(HR)$. Para obtener el **hazard ratio**, necesitamos 'exponenciar' los coeficientes de regresión (es decir, $exp(log(HR))$).
+
+En este ejemplo, el HR=3.73, con un intervalo de confianza del 95% que va de 3.48 a 4.00.
+
+La manera usual de interpretar este coeficiente es que aquellos con diabetes tuvieron un riesgo de mortalidad por todas las causas casi cuatro veces mayor (HR 3.73, IC 95% 3.48-4.00) que aquellos sin diabetes al reclutamiento.
+
+Puede ser útil ver el número de participantes y el número de eventos (es decir, muertes) que se observaron en cada uno de los niveles de tu factor de riesgo para asegurarte de que los números sí suman.  
+
+```{r}
+# Número de participantes con vs sin diabetes 
+table(dummy_df$has_diabetes)
+# Número de eventos (donde d000 == 1) para cada nivel de has_diabetes
+table(dummy_df$has_diabetes, dummy_df$d000)
+```
+
+### Correr un modelo de Cox de múltiples variables {.tabset .tabset-fade .tabset-pills}
+
+#### Instrucciones
+
+Porque estamos interesados en la asociación entre diabetes y mortalidad por todas las causas mientras ajustamos por un conjunto de factores confusores, necesitamos agregar tales factores confusores al modelo de regresión.
+
+```{r}
+cox_mod_2 <- 
+  # Definir modelo usando la función coxph 
+  coxph(
+    # El lado izquierdo de la ecuación incluye el seguimiento y la censura
+    Surv(person_years,d000) ~
+      # El lado derecho incluye todos los factores de interés
+      has_diabetes + age_10yr + sex + coyoacan + edu_level_cat + smokegp_cat + alcgp_cat + physgp_cat,
+      # Los datos a usar
+      data = dummy_df)
+```
+
+Mira `summary(cox_mod_2)`. Trata de interpretar los resultados para la asociación de diabetes y mortalidad por todas las causas ajustada por factores de confusión.
+
+------------------------------------------------------------------------
+
+#### Interpretación
+
+```{r}
+# Usar summary para mostrar los resultados clave
+summary(cox_mod_2)
+```
+
+Después de ajustar por características sociodemográficas y de estilo de vida, la asociación entre diabetes y mortalidad se atenuó. Específicamente, después de ajustes por características sociodemográficas y de estilo de vida, aquellos con diabetes tenían más del doble de riesgos de mortalidad por todas las causas (HR 2.42, IC 95% 2.25-2.60) que aquellos sin diabetes al reclutamiento.  
+
+**Conocimiento avanzado**: Porque en este modelo el resultado es mortalidad por todas las causas, el hazard ratio puede ser interpretado como una razón de tasas de mortalidad ajustada.  
+
+------------------------------------------------------------------------
+
+## Actividad: Tabaquismo y mortalidad vascular {.tabset .tabset-fade .tabset-pills}
+
+### Instrucciones
+
+Usando los ejemplos proporcionados arriba, estima la asociación entre **tabaquismo** al reclutamiento y mortalidad **vascular**.
+
+Para este análisis, **ajustarás** por los siguientes factores de confusión incluyéndolos en el modelo de regresión:
+
+-   Edad\
+-   Sexo\
+-   Distrito de residencia\
+-   Nivel educativo\
+-   Consumo de alcohol y actividad física
+
+------------------------------------------------------------------------
+
+### Pista
+
+Los eventos de mortalidad vascular están definidos en la columna `d015`.
+
+------------------------------------------------------------------------
+
+### Respuesta
+
+```{r}
+cox_mod_3 <- 
+  # Definir modelo usando la función coxph 
+  coxph(
+    # El lado izquierdo de la ecuación incluye el seguimiento y la censura
+    Surv(person_years,d015) ~
+      # El lado derecho incluye todos los factores de interés
+      smokegp_cat + age_10yr + sex + coyoacan + edu_level_cat +  alcgp_cat + physgp_cat,
+      # Los datos a usar
+      data = dummy_df)
+
+summary(cox_mod_3)
+
+table(dummy_df$smokegp_cat)
+table(dummy_df$smokegp_cat, dummy_df$d015)
+```
+
+Los análisis incluyeron 20,000 participantes y 1194 eventos.
+
+Comparado con personas que nunca fumaron, aquellos que fumaron más de 10 cigarrillos por día al reclutamiento tuvieron un riesgo de mortalidad vascular 1.5 veces mayor (HR 1.5, IC 95% 1.2-1.9).
+
+------------------------------------------------------------------------
+
+# 2. El supuesto de Riesgos Proporcionales (RRPP)
+
+## Visualización
+
+Como se discutió en la clase, una manera de evaluar el supuesto de RRPP es a través de la visualización de la relación entre tiempo y el riesgo acumulativo.
+
+Esto usualmente se llama el gráfico -log(-log(supervivencia)) vs log(tiempo).
+
+Sería útil visualizar la relación de estos dos factores en aquellos con vs sin diabetes:
+
+```{r}
+# Crear el gráfico log(-log(supervivencia))
+surv_fit_bydm <- 
+  survfit(Surv(person_years, d000) ~ has_diabetes,
+           data = dummy_df)
+
+plot(x = log(surv_fit_bydm$time),
+     y = -log(-log(surv_fit_bydm$surv)),
+     xlab = "log(tiempo)",
+     ylab = "-log(-log(supervivencia))",
+     main = "Gráfico -log-log supervivencia por diabetes")
+```
+
+Parece que las líneas son paralelas.
+
+También sería útil revisar otros factores, como la edad.
+
+```{r}
+# Crear el gráfico log(-log(supervivencia))
+surv_fit_byage <- 
+  survfit(Surv(person_years, d000) ~ age_10yr,
+           data = dummy_df)
+
+plot(x = log(surv_fit_byage$time),
+     y = -log(-log(surv_fit_byage$surv)),
+     xlab = "log(tiempo)",
+     ylab = "-log(-log(supervivencia))",
+     main = "Gráfico -log-log supervivencia por edad")
+```
+
+Aunque esta es una evaluación relativamente subjetiva, sería razonable decir que no todas las líneas son paralelas. Las dos superiores se cruzan entre sí.
+
+## Prueba formal
+
+La función `cox.zph()` del paquete `survival` correlaciona el conjunto correspondiente de residuales de Schoenfeld escalados con el tiempo (para cada covariable), para probar la independencia entre residuales y tiempo.
+
+Implementado al modelo usado antes:
+
+```{r}
+cox.zph(cox_mod_2)
+```
+
+Sugiere que hay razón para creer que el supuesto de RRPP podría no cumplirse, especialmente con respecto a la edad.
+
+**Recuerda**: si la proporcionalidad de riesgos no se cumple, las estrategias incluyen agregar un término de interacción con el tiempo al modelo o estratificar por la covariable.  
+
+**Conocimiento avanzado**: Cuando la suposición de proporcionalidad no se cumple, una posibilidad es que el log(HR) varíe en diferentes puntos durante el seguimiento. Por ejemplo, el HR puede ser de ~4 en los primeros 5 años de seguimiento y luego ser de ~2 durante el resto del seguimiento disponible.  
+
+Sin embargo, incluso si ese es el caso, el log(HR) general o total aún es una métrica útil que representa el riesgo *promedio* observado durante el seguimiento.  
+
+---------------------------------------------------------------------------------
+
+# Resumen
+
+**Este es el final de esta libreta de ejercicios prácticos.**  
+
+Durante este práctica:
+
+- Preparaste tus datos y realizaste modelos de Riesgos Proporcionales de Cox para estimar el riesgo de muerte asociado con diabetes.  
+- Aprendiste algunos enfoques básicos para evaluar las suposiciones de proporcionalidad de modelos Cox PH.  
+
+
+Después de la siguiente sesión teórica, en la siguiente práctica aprenderás cómo implementar modelos de **edad-en-riesgo**.
+
+Regresar a la [Tabla de Contenido](index.html).
+
+\newpage
